@@ -11,6 +11,8 @@ import org.bukkit.event.HandlerList;
 import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.ClickType;
 import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryDragEvent;
+import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.event.player.PlayerSwapHandItemsEvent;
 import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.plugin.RegisteredListener;
@@ -24,10 +26,12 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Finds the plugin that cancels offhand actions.
+ * Finds the plugin that cancels offhand actions (F key, offhand slot clicks, offhand drags).
  *
- * Idea: we listen at EVERY priority. If the event is not cancelled at priority N but is cancelled
- * at priority N+1, then the plugin that cancelled it is one of the plugins listening at priority N.
+ * How: we register one listener per priority. When the event is not cancelled at our listener of priority N-1
+ * but is cancelled at our listener of priority N, the canceller is a listener that sits BETWEEN our two listeners
+ * in the event's execution order. We read that exact window from the HandlerList, so the suspect list is usually
+ * one or two plugins instead of a whole priority tier.
  */
 public final class OffhandDebug extends JavaPlugin implements Listener {
     private static final EventPriority[] ORDER = {
@@ -51,6 +55,13 @@ public final class OffhandDebug extends JavaPlugin implements Listener {
                                     click.getWhoClicked() instanceof Player p ? p : null);
                         }
                     }, this, false);
+            Bukkit.getPluginManager().registerEvent(InventoryDragEvent.class, this, current,
+                    (listener, event) -> {
+                        if (event instanceof InventoryDragEvent drag && isOffhandDrag(drag)) {
+                            track(event, current, "Offhand inventory drag",
+                                    drag.getWhoClicked() instanceof Player p ? p : null);
+                        }
+                    }, this, false);
         }
         // Wait one tick so every other plugin has registered its listeners.
         Bukkit.getScheduler().runTask(this, () -> {
@@ -66,6 +77,11 @@ public final class OffhandDebug extends JavaPlugin implements Listener {
         return click.getClickedInventory() instanceof PlayerInventory && click.getSlot() == 40;
     }
 
+    private boolean isOffhandDrag(InventoryDragEvent drag) {
+        // In the player's own inventory view the offhand is raw slot 45.
+        return drag.getView().getTopInventory().getType() == InventoryType.CRAFTING && drag.getRawSlots().contains(45);
+    }
+
     private void track(Event event, EventPriority current, String label, Player player) {
         if (!(event instanceof Cancellable cancellable)) return;
         Player actor = player;
@@ -75,10 +91,13 @@ public final class OffhandDebug extends JavaPlugin implements Listener {
         Boolean before = lastState.get(event);
         if (cancelled && (before == null || !before)) {
             int index = indexOf(current);
-            EventPriority suspectPriority = index == 0 ? current : ORDER[index - 1];
-            Set<String> suspects = pluginsAt(event, suspectPriority);
-            String text = label + " was CANCELLED. Cancelled at/after " + suspectPriority
-                    + " by one of: " + (suspects.isEmpty() ? "(unknown / another listener)" : String.join(", ", suspects));
+            EventPriority previous = index == 0 ? null : ORDER[index - 1];
+            List<String> suspects = suspectsBetween(event, previous, current);
+            String window = previous == null ? "before the first " + current + " listener" : "between " + previous + " and " + current;
+            String text = label + " was CANCELLED " + window + ". Suspects (in execution order): "
+                    + (suspects.isEmpty()
+                    ? "none - no plugin listener runs in that window, so it was cancelled by Paper/vanilla or by a packet-level plugin (ProtocolLib/PacketEvents) before the event"
+                    : String.join(", ", suspects));
             getLogger().warning((actor != null ? actor.getName() + ": " : "") + text);
             if (actor != null && actor.hasPermission("gawharaoffhanddebug.use")) actor.sendMessage("§e[OffhandDebug] §c" + text);
         }
@@ -91,12 +110,21 @@ public final class OffhandDebug extends JavaPlugin implements Listener {
         return 0;
     }
 
-    private Set<String> pluginsAt(Event event, EventPriority priority) {
-        Set<String> names = new LinkedHashSet<>();
-        for (RegisteredListener listener : event.getHandlers().getRegisteredListeners()) {
-            if (listener.getPriority() == priority && listener.getPlugin() != this) names.add(listener.getPlugin().getName());
+    /** Plugins whose listeners run strictly between our listener at {@code previous} and our listener at {@code current}. */
+    private List<String> suspectsBetween(Event event, EventPriority previous, EventPriority current) {
+        RegisteredListener[] all = event.getHandlers().getRegisteredListeners();
+        int from = -1;
+        int to = all.length;
+        for (int i = 0; i < all.length; i++) {
+            if (all[i].getPlugin() != this) continue;
+            if (previous != null && all[i].getPriority() == previous) from = i;
+            if (all[i].getPriority() == current) to = i;
         }
-        return names;
+        Set<String> names = new LinkedHashSet<>();
+        for (int i = from + 1; i < to && i < all.length; i++) {
+            if (all[i].getPlugin() != this) names.add(all[i].getPlugin().getName() + " (" + all[i].getPriority() + ")");
+        }
+        return new ArrayList<>(names);
     }
 
     private List<String> describe(HandlerList list) {
