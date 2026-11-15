@@ -1,0 +1,14 @@
+name: GawharaOffhandDebug
+version: 1.0.0
+main: com.gawharasmp.offhanddebug.OffhandDebug
+api-version: '26.3'
+authors: [GawharaSMP]
+description: Finds which plugin cancels offhand swaps (F key) and offhand inventory clicks.
+commands:
+  offhanddebug:
+    description: Show which plugins listen to offhand events
+    usage: /offhanddebug
+permissions:
+  gawharaoffhanddebug.use:
+    description: Receive offhand debug messages and use /offhanddebug
+    default: op
